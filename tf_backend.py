@@ -20,213 +20,108 @@ from glob import glob
 from PIL import Image
 import pickle
 
-"""## Download and prepare the MS-COCO dataset
+do_not_train_words = 1
 
-We will use the [MS-COCO dataset](http://cocodataset.org/#home) to train our model. This dataset contains >82,000 images, each of which has been annotated with at least 5 different captions. The code below will download and extract the dataset automatically.
+if do_not_train_words:
+	PATH = os.path.abspath('.')+'/train2014/'
 
-**Caution: large download ahead**. We'll use the training set, it's a 13GB file.
-"""
+	annotation_file = os.path.abspath('.') +'/annotations/captions_train2014.json'
 
-annotation_zip = tf.keras.utils.get_file('captions.zip',
-                                          cache_subdir=os.path.abspath('.'),
-                                          origin = 'http://images.cocodataset.org/annotations/annotations_trainval2014.zip',
-                                          extract = True)
-annotation_file = os.path.dirname(annotation_zip)+'/annotations/captions_train2014.json'
 
-name_of_zip = 'train2014.zip'
-if not os.path.exists(os.path.abspath('.') + '/' + name_of_zip):
-  image_zip = tf.keras.utils.get_file(name_of_zip,
-                                      cache_subdir=os.path.abspath('.'),
-                                      origin = 'http://images.cocodataset.org/zips/train2014.zip',
-                                      extract = True)
-  PATH = os.path.dirname(image_zip)+'/train2014/'
-else:
-  PATH = os.path.abspath('.')+'/train2014/'
+	# read the json file
+	with open(annotation_file, 'r') as f:
+	    annotations = json.load(f)
 
-"""## Optionally, limit the size of the training set for faster training
-For this example, we'll select a subset of 30,000 captions and use these and the corresponding images to train our model. As always, captioning quality will improve if you choose to use more data.
-"""
+	# storing the captions and the image name in vectors
+	all_captions = []
+	all_img_name_vector = []
 
-# read the json file
-with open(annotation_file, 'r') as f:
-    annotations = json.load(f)
+	for annot in annotations['annotations']:
+	    caption = '<start> ' + annot['caption'] + ' <end>'
+	    image_id = annot['image_id']
+	    full_coco_image_path = PATH + 'COCO_train2014_' + '%012d.jpg' % (image_id)
 
-# storing the captions and the image name in vectors
-all_captions = []
-all_img_name_vector = []
+	    all_img_name_vector.append(full_coco_image_path)
+	    all_captions.append(caption)
 
-for annot in annotations['annotations']:
-    caption = '<start> ' + annot['caption'] + ' <end>'
-    image_id = annot['image_id']
-    full_coco_image_path = PATH + 'COCO_train2014_' + '%012d.jpg' % (image_id)
+	# shuffling the captions and image_names together
+	# setting a random state
+	train_captions, img_name_vector = shuffle(all_captions,
+	                                          all_img_name_vector,
+	                                          random_state=1)
 
-    all_img_name_vector.append(full_coco_image_path)
-    all_captions.append(caption)
+	# selecting the first 30000 captions from the shuffled set
+	num_examples = 30000
+	train_captions = train_captions[:num_examples]
+	img_name_vector = img_name_vector[:num_examples]
 
-# shuffling the captions and image_names together
-# setting a random state
-train_captions, img_name_vector = shuffle(all_captions,
-                                          all_img_name_vector,
-                                          random_state=1)
+	# This will find the maximum length of any caption in our dataset
+	def calc_max_length(tensor):
+	    return max(len(t) for t in tensor)
 
-# selecting the first 30000 captions from the shuffled set
-num_examples = 30000
-train_captions = train_captions[:num_examples]
-img_name_vector = img_name_vector[:num_examples]
+	# The steps above is a general process of dealing with text processing
 
-len(train_captions), len(all_captions)
+	# choosing the top 5000 words from the vocabulary
+	top_k = 5000
+	tokenizer = tf.keras.preprocessing.text.Tokenizer(num_words=top_k,
+	                                                  oov_token="<unk>",
+	                                                  filters='!"#$%&()*+.,-/:;=?@[\]^_`{|}~ ')
+	tokenizer.fit_on_texts(train_captions)
+	train_seqs = tokenizer.texts_to_sequences(train_captions)
 
-"""## Preprocess the images using InceptionV3
-Next, we will use InceptionV3 (pretrained on Imagenet) to classify each image. We will extract features from the last convolutional layer.
+	tokenizer.word_index['<pad>'] = 0
+	tokenizer.index_word[0] = '<pad>'
 
-First, we will need to convert the images into the format inceptionV3 expects by:
-* Resizing the image to (299, 299)
-* Using the [preprocess_input](https://www.tensorflow.org/api_docs/python/tf/keras/applications/inception_v3/preprocess_input) method to place the pixels in the range of -1 to 1 (to match the format of the images used to train InceptionV3).
-"""
+	# creating the tokenized vectors
+	train_seqs = tokenizer.texts_to_sequences(train_captions)
 
-def load_image(image_path):
-    img = tf.io.read_file(image_path)
-    img = tf.image.decode_jpeg(img, channels=3)
-    img = tf.image.resize(img, (299, 299))
-    img = tf.keras.applications.inception_v3.preprocess_input(img)
-    return img, image_path
+	# padding each vector to the max_length of the captions
+	# if the max_length parameter is not provided, pad_sequences calculates that automatically
+	cap_vector = tf.keras.preprocessing.sequence.pad_sequences(train_seqs, padding='post')
 
-"""## Initialize InceptionV3 and load the pretrained Imagenet weights
+	# calculating the max_length
+	# used to store the attention weights
+	max_length = calc_max_length(train_seqs)
 
-To do so, we'll create a tf.keras model where the output layer is the last convolutional layer in the InceptionV3 architecture.
-* Each image is forwarded through the network and the vector that we get at the end is stored in a dictionary (image_name --> feature_vector).
-* We use the last convolutional layer because we are using attention in this example. The shape of the output of this layer is ```8x8x2048```.
-* We avoid doing this during training so it does not become a bottleneck.
-* After all the images are passed through the network, we pickle the dictionary and save it to disk.
-"""
+	# Create training and validation sets using 80-20 split
+	img_name_train, img_name_val, cap_train, cap_val = train_test_split(img_name_vector,
+	                                                                    cap_vector,
+	                                                                    test_size=0.2,
+	                                                                    random_state=0)
 
-image_model = tf.keras.applications.InceptionV3(include_top=False,
-                                                weights='imagenet')
-new_input = image_model.input
-hidden_layer = image_model.layers[-1].output
-
-image_features_extract_model = tf.keras.Model(new_input, hidden_layer)
-
-"""## Caching the features extracted from InceptionV3
-
-We will pre-process each image with InceptionV3 and cache the output to disk. Caching the output in RAM would be faster but memory intensive, requiring 8 \* 8 \* 2048 floats per image. At the time of writing, this would exceed the memory limitations of Colab (although these may change, an instance appears to have about 12GB of memory currently).
-
-Performance could be improved with a more sophisticated caching strategy (e.g., by sharding the images to reduce random access disk I/O) at the cost of more code.
-
-This will take about 10 minutes to run in Colab with a GPU. If you'd like to see a progress bar, you could: install [tqdm](https://github.com/tqdm/tqdm) (```!pip install tqdm```), import it (```from tqdm import tqdm```), then change this line: 
-
-```for img, path in image_dataset:```
-
-to:
-
-```for img, path in tqdm(image_dataset):```.
-"""
-
-# getting the unique images
-encode_train = sorted(set(img_name_vector))
-
-# feel free to change the batch_size according to your system configuration
-image_dataset = tf.data.Dataset.from_tensor_slices(encode_train)
-image_dataset = image_dataset.map(
-  load_image, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(16)
-
-for img, path in image_dataset:
-  batch_features = image_features_extract_model(img)
-  batch_features = tf.reshape(batch_features,
-                              (batch_features.shape[0], -1, batch_features.shape[3]))
-
-  for bf, p in zip(batch_features, path):
-    path_of_feature = p.numpy().decode("utf-8")
-    np.save(path_of_feature, bf.numpy())
-
-"""## Preprocess and tokenize the captions
-
-* First, we'll tokenize the captions (e.g., by splitting on spaces). This will give us a  vocabulary of all the unique words in the data (e.g., "surfing", "football", etc).
-* Next, we'll limit the vocabulary size to the top 5,000 words to save memory. We'll replace all other words with the token "UNK" (for unknown).
-* Finally, we create a word --> index mapping and vice-versa.
-* We will then pad all sequences to the be same length as the longest one.
-"""
-
-# This will find the maximum length of any caption in our dataset
-def calc_max_length(tensor):
-    return max(len(t) for t in tensor)
-
-# The steps above is a general process of dealing with text processing
-
-# choosing the top 5000 words from the vocabulary
-top_k = 5000
-tokenizer = tf.keras.preprocessing.text.Tokenizer(num_words=top_k,
-                                                  oov_token="<unk>",
-                                                  filters='!"#$%&()*+.,-/:;=?@[\]^_`{|}~ ')
-tokenizer.fit_on_texts(train_captions)
-train_seqs = tokenizer.texts_to_sequences(train_captions)
-
-tokenizer.word_index['<pad>'] = 0
-tokenizer.index_word[0] = '<pad>'
-
-# creating the tokenized vectors
-train_seqs = tokenizer.texts_to_sequences(train_captions)
-
-# padding each vector to the max_length of the captions
-# if the max_length parameter is not provided, pad_sequences calculates that automatically
-cap_vector = tf.keras.preprocessing.sequence.pad_sequences(train_seqs, padding='post')
-
-# calculating the max_length
-# used to store the attention weights
-max_length = calc_max_length(train_seqs)
-
-"""## Split the data into training and testing"""
-
-# Create training and validation sets using 80-20 split
-img_name_train, img_name_val, cap_train, cap_val = train_test_split(img_name_vector,
-                                                                    cap_vector,
-                                                                    test_size=0.2,
-                                                                    random_state=0)
-
-len(img_name_train), len(cap_train), len(img_name_val), len(cap_val)
-
-"""## Our images and captions are ready! Next, let's create a tf.data dataset to use for training our model."""
-
-# feel free to change these parameters according to your system's configuration
 
 BATCH_SIZE = 64
 BUFFER_SIZE = 1000
 embedding_dim = 256
 units = 512
-vocab_size = len(tokenizer.word_index) + 1
-num_steps = len(img_name_train) // BATCH_SIZE
+if do_not_train_words:
+	vocab_size = 8236
+else:
+	vocab_size =  len(tokenizer.word_index) + 1
+	num_steps = len(img_name_train) // BATCH_SIZE
+
 # shape of the vector extracted from InceptionV3 is (64, 2048)
 # these two variables represent that
 features_shape = 2048
 attention_features_shape = 64
 
-# loading the numpy files
-def map_func(img_name, cap):
-  img_tensor = np.load(img_name.decode('utf-8')+'.npy')
-  return img_tensor, cap
+if do_not_train_words:
+	# loading the numpy files
+	def map_func(img_name, cap):
+	  img_tensor = np.load(img_name.decode('utf-8')+'.npy')
+	  return img_tensor, cap
 
-dataset = tf.data.Dataset.from_tensor_slices((img_name_train, cap_train))
+	dataset = tf.data.Dataset.from_tensor_slices((img_name_train, cap_train))
 
-# using map to load the numpy files in parallel
-dataset = dataset.map(lambda item1, item2: tf.numpy_function(
-          map_func, [item1, item2], [tf.float32, tf.int32]),
-          num_parallel_calls=tf.data.experimental.AUTOTUNE)
+	# using map to load the numpy files in parallel
+	dataset = dataset.map(lambda item1, item2: tf.numpy_function(
+	          map_func, [item1, item2], [tf.float32, tf.int32]),
+	          num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
-# shuffling and batching
-dataset = dataset.shuffle(BUFFER_SIZE).batch(BATCH_SIZE)
-dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+	# shuffling and batching
+	dataset = dataset.shuffle(BUFFER_SIZE).batch(BATCH_SIZE)
+	dataset = dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
 
-"""## Model
-
-Fun fact, the decoder below is identical to the one in the example for [Neural Machine Translation with Attention](../sequences/nmt_with_attention.ipynb).
-
-The model architecture is inspired by the [Show, Attend and Tell](https://arxiv.org/pdf/1502.03044.pdf) paper.
-
-* In this example, we extract the features from the lower convolutional layer of InceptionV3 giving us a vector of shape (8, 8, 2048).
-* We squash that to a shape of (64, 2048).
-* This vector is then passed through the CNN Encoder(which consists of a single Fully connected layer).
-* The RNN(here GRU) attends over the image to predict the next word.
-"""
 
 class BahdanauAttention(tf.keras.Model):
   def __init__(self, units):
@@ -313,6 +208,14 @@ class RNN_Decoder(tf.keras.Model):
 encoder = CNN_Encoder(embedding_dim)
 decoder = RNN_Decoder(embedding_dim, units, vocab_size)
 
+image_model = tf.keras.applications.InceptionV3(include_top=False,
+                                                weights='imagenet')
+new_input = image_model.input
+hidden_layer = image_model.layers[-1].output
+
+image_features_extract_model = tf.keras.Model(new_input, hidden_layer)
+
+
 optimizer = tf.keras.optimizers.Adam()
 loss_object = tf.keras.losses.SparseCategoricalCrossentropy(
     from_logits=True, reduction='none')
@@ -329,14 +232,20 @@ def loss_function(real, pred):
 """## Checkpoint"""
 
 checkpoint_path = "./checkpoints/train"
-ckpt = tf.train.Checkpoint(encoder=encoder,
-                           decoder=decoder,
+ckpt = tf.train.Checkpoint(encoder = encoder,
+                           decoder = decoder,
                            optimizer = optimizer)
 ckpt_manager = tf.train.CheckpointManager(ckpt, checkpoint_path, max_to_keep=5)
 
 start_epoch = 0
+
+skip_training = False
+ckpt.restore(ckpt_manager.latest_checkpoint)
 if ckpt_manager.latest_checkpoint:
-  start_epoch = int(ckpt_manager.latest_checkpoint.split('-')[-1])
+	skip_training = True
+else:
+	print("ERROR: You've not copied checkpoints from Google drive. Please refer to README for future details")
+	exit(1)
 
 """## Training
 
@@ -348,6 +257,7 @@ if ckpt_manager.latest_checkpoint:
 * Teacher forcing is the technique where the target word is passed as the next input to the decoder.
 * The final step is to calculate the gradients and apply it to the optimizer and backpropagate.
 """
+
 
 # adding this in a separate cell because if you run the training cell
 # many times, the loss_plot array will be reset
@@ -387,39 +297,58 @@ def train_step(img_tensor, target):
 
 EPOCHS = 20
 
-for epoch in range(start_epoch, EPOCHS):
-    start = time.time()
-    total_loss = 0
+if not skip_training:
+	for epoch in range(start_epoch, EPOCHS):
+	    start = time.time()
+	    total_loss = 0
 
-    for (batch, (img_tensor, target)) in enumerate(dataset):
-        batch_loss, t_loss = train_step(img_tensor, target)
-        total_loss += t_loss
+	    for (batch, (img_tensor, target)) in enumerate(dataset):
+	        batch_loss, t_loss = train_step(img_tensor, target)
+	        total_loss += t_loss
 
-        if batch % 100 == 0:
-            print ('Epoch {} Batch {} Loss {:.4f}'.format(
-              epoch + 1, batch, batch_loss.numpy() / int(target.shape[1])))
-    # storing the epoch end loss value to plot later
-    loss_plot.append(total_loss / num_steps)
+	        if batch % 100 == 0:
+	            print ('Epoch {} Batch {} Loss {:.4f}'.format(
+	              epoch + 1, batch, batch_loss.numpy() / int(target.shape[1])))
+	    # storing the epoch end loss value to plot later
+	    loss_plot.append(total_loss / num_steps)
 
-    if epoch % 5 == 0:
-      ckpt_manager.save()
+	    if epoch % 5 == 0:
+	    	ckpt_manager.save()
 
-    print ('Epoch {} Loss {:.6f}'.format(epoch + 1,
-                                         total_loss/num_steps))
-    print ('Time taken for 1 epoch {} sec\n'.format(time.time() - start))
+	    print ('Epoch {} Loss {:.6f}'.format(epoch + 1,
+	                                         total_loss/num_steps))
+	    print ('Time taken for 1 epoch {} sec\n'.format(time.time() - start))
 
-plt.plot(loss_plot)
-plt.xlabel('Epochs')
-plt.ylabel('Loss')
-plt.title('Loss Plot')
-plt.show()
+	plt.plot(loss_plot)
+	plt.xlabel('Epochs')
+	plt.ylabel('Loss')
+	plt.title('Loss Plot')
+	plt.show()
 
-"""## Caption!
+def load_image(image_path):
+    img = tf.io.read_file(image_path)
+    img = tf.image.decode_jpeg(img, channels=3)
+    img = tf.image.resize(img, (299, 299))
+    img = tf.keras.applications.inception_v3.preprocess_input(img)
+    return img, image_path
 
-* The evaluate function is similar to the training loop, except we don't use teacher forcing here. The input to the decoder at each time step is its previous predictions along with the hidden state and the encoder output.
-* Stop predicting when the model predicts the end token.
-* And store the attention weights for every time step.
-"""
+
+def plot_attention(image, result, attention_plot):
+    temp_image = np.array(Image.open(image))
+
+    fig = plt.figure(figsize=(10, 10))
+
+    len_result = len(result)
+    for l in range(len_result):
+        temp_att = np.resize(attention_plot[l], (8, 8))
+        ax = fig.add_subplot(len_result//2, len_result//2, l+1)
+        ax.set_title(result[l])
+        img = ax.imshow(temp_image)
+        ax.imshow(temp_att, cmap='gray', alpha=0.6, extent=img.get_extent())
+
+    plt.tight_layout()
+    plt.show()
+
 
 def evaluate(image):
     attention_plot = np.zeros((max_length, attention_features_shape))
@@ -451,50 +380,45 @@ def evaluate(image):
     attention_plot = attention_plot[:len(result), :]
     return result, attention_plot
 
-def plot_attention(image, result, attention_plot):
-    temp_image = np.array(Image.open(image))
 
-    fig = plt.figure(figsize=(10, 10))
+def process_image(image_path):
+	result, attention_plot = evaluate(image_path)
+	print ('Prediction Caption inside function:', ' '.join(result))
+	plot_attention(image_path, result, attention_plot)
+	# opening the image
 
-    len_result = len(result)
-    for l in range(len_result):
-        temp_att = np.resize(attention_plot[l], (8, 8))
-        ax = fig.add_subplot(len_result//2, len_result//2, l+1)
-        ax.set_title(result[l])
-        img = ax.imshow(temp_image)
-        ax.imshow(temp_att, cmap='gray', alpha=0.6, extent=img.get_extent())
+	return result
 
-    plt.tight_layout()
-    plt.show()
 
-# captions on the validation set
-rid = np.random.randint(0, len(img_name_val))
-image = img_name_val[rid]
-real_caption = ' '.join([tokenizer.index_word[i] for i in cap_val[rid] if i not in [0]])
-result, attention_plot = evaluate(image)
+def image_url_to_path(url):
+	return tf.keras.utils.get_file(url.rsplit('/', 1)[-1],
+                                     origin=url)
 
-print ('Real Caption:', real_caption)
-print ('Prediction Caption:', ' '.join(result))
-plot_attention(image, result, attention_plot)
-# opening the image
-Image.open(img_name_val[rid])
 
-"""## Try it on your own images
-For fun, below we've provided a method you can use to caption your own images with the model we've just trained. Keep in mind, it was trained on a relatively small amount of data, and your images may be different from the training data (so be prepared for weird results!)
-"""
+def get_caption_from_image(image_url, show_image = False):
+	path_to_image = image_url_to_path(image_url)
+	result = process_image(path_to_image)
 
-image_url = 'https://tensorflow.org/images/surf.jpg'
-image_extension = image_url[-4:]
-image_path = tf.keras.utils.get_file('image'+image_extension,
-                                     origin=image_url)
+	if show_image:
+		Image.open(path_to_image)
 
-result, attention_plot = evaluate(image_path)
-print ('Prediction Caption:', ' '.join(result))
-plot_attention(image_path, result, attention_plot)
-# opening the image
-Image.open(image_path)
 
-"""# Next steps
+	return result
 
-Congrats! You've just trained an image captioning model with attention. Next, we recommend taking a look at this example [Neural Machine Translation with Attention](../sequences/nmt_with_attention.ipynb). It uses a similar architecture to translate between Spanish and English sentences. You can also experiment with training the code in this notebook on a different dataset.
-"""
+
+# examples of usage 
+
+image_giraffe = 'https://i.dailymail.co.uk/i/pix/2017/11/22/22/469A374A00000578-5109115-A_pair_of_lions_risked_their_lives_in_an_attempt_to_take_down_a_-a-95_1511388548555.jpg'
+
+res = get_caption_from_image(image_giraffe)
+
+print("Result is: " + str(res))
+
+
+image_seagull = 'https://www.wonderplugin.com/videos/demo-image0.jpg'
+
+res = get_caption_from_image(image_seagull, True)
+
+print("Result is: " + str(res))
+
+
