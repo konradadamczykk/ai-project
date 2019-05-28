@@ -1,5 +1,8 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 
+import matplotlib
+matplotlib.use('TkAgg')
+
 #!pip install tensorflow-gpu==2.0.0-alpha0
 import tensorflow as tf
 
@@ -17,8 +20,16 @@ import os
 import time
 import json
 from glob import glob
-from PIL import Image
 import pickle
+from PIL import Image, ImageTk
+
+#UI
+# add to import
+try:
+    import tkinter as tk
+except ImportError:    # python 2
+    import Tkinter as tk
+
 
 do_not_train_words = 1
 
@@ -405,20 +416,47 @@ def get_caption_from_image(image_url, show_image = False):
 
 	return result
 
+# UI
+class MainApplication(tk.Frame):
+  def __init__(self, parent, *args, **kwargs):
+    tk.Frame.__init__(self, parent, *args, **kwargs)
+    self.parent = parent
+    self.grid()
+    self.create_widgets()
+ 
+  def create_widgets(self):
+    self.instruction = tk.Label(self, text = "Image url:")
+    self.instruction.grid(row = 0, column = 0, sticky = tk.W)
+ 
+    self.path = tk.Entry(self)
+    self.path.grid(row = 0, column = 10, sticky = tk.W)
+ 
+    self.submit_button = tk.Button(self, text = "Submit", command = self.submit_touched)
+    self.submit_button.grid(row = 1, column = 0, sticky = tk.W)
+ 
+ 
+  def submit_touched(self):
+    content = self.path.get()
+    get_caption_from_image(content)
+ 
+root = tk.Tk()
+MainApplication(root)
+root.mainloop()
+
 
 # examples of usage 
 
-image_giraffe = 'https://i.dailymail.co.uk/i/pix/2017/11/22/22/469A374A00000578-5109115-A_pair_of_lions_risked_their_lives_in_an_attempt_to_take_down_a_-a-95_1511388548555.jpg'
+# image_giraffe = 'https://i.dailymail.co.uk/i/pix/2017/11/22/22/469A374A00000578-5109115-A_pair_of_lions_risked_their_lives_in_an_attempt_to_take_down_a_-a-95_1511388548555.jpg'
 
-res = get_caption_from_image(image_giraffe)
+# res = get_caption_from_image(image_giraffe)
 
-print("Result is: " + str(res))
+# print("Result is: " + str(res))
 
 
-image_seagull = 'https://www.wonderplugin.com/videos/demo-image0.jpg'
+# image_seagull = 'https://www.wonderplugin.com/videos/demo-image0.jpg'
 
-res = get_caption_from_image(image_seagull, True)
+# res = get_caption_from_image(image_seagull, True)
 
-print("Result is: " + str(res))
+# print("Result is: " + str(res))
 
 
